@@ -1,14 +1,35 @@
 const { Bot, InputFile } = require("grammy");
 const Anthropic = require("@anthropic-ai/sdk");
+const http = require("http");
 require("dotenv").config();
 
 // ==== এখানে দুটো জিনিস বসান (নিচে .env ফাইলেও করা যায়, ওটাই ভালো) ====
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+const RENDER_EXTERNAL_URL = process.env.RENDER_EXTERNAL_URL; // Render নিজে থেকেই এটা সেট করে দেয়
 
 if (!TELEGRAM_BOT_TOKEN || !ANTHROPIC_API_KEY) {
   console.error("❌ .env ফাইলে TELEGRAM_BOT_TOKEN বা ANTHROPIC_API_KEY নেই!");
   process.exit(1);
+}
+
+// ==== Render Web Service এর জন্য ছোট HTTP server ====
+// Render ফ্রি টিয়ারে "Web Service" টাইপ একটা খোলা পোর্ট চায়, নাহলে ডিপ্লয় fail দেখাবে।
+// এই সার্ভার শুধু "আমি জীবিত আছি" বলার জন্য, বটের আসল কাজের সাথে সম্পর্কহীন।
+const PORT = process.env.PORT || 3000;
+http
+  .createServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    res.end("Bot is running.");
+  })
+  .listen(PORT, () => console.log(`🌐 Health check server on port ${PORT}`));
+
+// ==== ফ্রি টিয়ার ১৫ মিনিট idle থাকলে ঘুমিয়ে যায়, তাই নিজেকে নিজে মাঝেমধ্যে ping করছে ====
+// এটা ১০০% গ্যারান্টি না (Render মাঝেমধ্যে তাও ঘুমাতে পারে), কিন্তু সাহায্য করে।
+if (RENDER_EXTERNAL_URL) {
+  setInterval(() => {
+    fetch(RENDER_EXTERNAL_URL).catch(() => {});
+  }, 10 * 60 * 1000); // প্রতি ১০ মিনিটে
 }
 
 const bot = new Bot(TELEGRAM_BOT_TOKEN);
