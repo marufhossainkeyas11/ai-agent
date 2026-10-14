@@ -10,7 +10,7 @@ const LLM_BASE_URL = (process.env.LLM_BASE_URL || "").replace(/\/+$/, "");
 const LLM_MODEL = process.env.LLM_MODEL;
 // শুধু এই Telegram ID কাজ করাতে পারবে (নিচে দেখুন)
 const OWNER_ID = (process.env.OWNER_ID || "").trim();
-// ElevenLabs (ঐচ্ছিক) — না থাকলে ভয়েস ফিচার বন্ধ থাকবে, বাকি বট আগের মতোই চলবে
+// ElevenLabs (মূল ফিচার)
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
 const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || "JBFqnCBsd6RMkjVDRZzb";
 const ELEVENLABS_TTS_MODEL = process.env.ELEVENLABS_TTS_MODEL || "eleven_v3"; // বাংলা সাপোর্ট করে
@@ -19,9 +19,7 @@ const RENDER_EXTERNAL_URL = process.env.RENDER_EXTERNAL_URL; // Render নিজ
 
 const missing = [];
 if (!TELEGRAM_BOT_TOKEN) missing.push("TELEGRAM_BOT_TOKEN");
-if (!LLM_API_KEY) missing.push("LLM_API_KEY");
-if (!LLM_BASE_URL) missing.push("LLM_BASE_URL");
-if (!LLM_MODEL) missing.push("LLM_MODEL");
+if (!ELEVENLABS_API_KEY) missing.push("ELEVENLABS_API_KEY");
 if (missing.length) {
   console.error(`❌ এই Environment Variable পাওয়া যায়নি: ${missing.join(", ")}`);
   // শুধু নাম দেখাচ্ছে (মান নয়), যাতে বানান ভুল ধরা যায়
@@ -30,6 +28,10 @@ if (missing.length) {
   console.error("ℹ️ নাম হুবহু মিলতে হবে — বড় হাতের অক্ষর, কোনো স্পেস নেই।");
   process.exit(1);
 }
+
+// AI (LLM_*) ঐচ্ছিক — না থাকলে বট শুধু ElevenLabs দিয়ে চলবে (লিখলে পড়ে শোনাবে, ভয়েস দিলে লিখে দেবে)
+const LLM_ENABLED = Boolean(LLM_API_KEY && LLM_BASE_URL && LLM_MODEL);
+console.log(LLM_ENABLED ? `🧠 AI চালু (${LLM_MODEL})` : "🧠 AI বন্ধ — শুধু ElevenLabs মোড");
 
 // ==== Render Web Service এর জন্য ছোট HTTP server ====
 // Render ফ্রি টিয়ারে "Web Service" টাইপ একটা খোলা পোর্ট চায়, নাহলে ডিপ্লয় fail দেখাবে।
@@ -85,10 +87,10 @@ function pushHistory(chatId, role, content) {
 }
 
 // ==== ElevenLabs: টেক্সট → ভয়েস ====
-async function textToSpeech(text) {
+async function textToSpeech(text, voiceId = ELEVENLABS_VOICE_ID) {
   const clean = text.replace(/[*_`#>~]/g, "").slice(0, 4500); // মার্কডাউন চিহ্ন বাদ + লিমিট
   const res = await fetch(
-    `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}?output_format=mp3_44100_64`,
+    `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=mp3_44100_64`,
     {
       method: "POST",
       headers: { "xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json" },
@@ -114,6 +116,47 @@ async function speechToText(audioBuffer) {
   return (data.text || "").trim();
 }
 
+
+// ==== সাধারণ ElevenLabs অডিও কল (SFX, মিউজিক, ভয়েস চেঞ্জার, নয়েজ রিমুভ) ====
+async function elevenAudio(path, { json, form } = {}) {
+  const res = await fetch(`https://api.elevenlabs.io${path}`, {
+    method: "POST",
+    headers: { "xi-api-key": ELEVENLABS_API_KEY, ...(json ? { "Content-Type": "application/json" } : {}) },
+    body: json ? JSON.stringify(json) : form,
+  });
+  if (!res.ok) throw new Error(`ElevenLabs ${res.status}: ${(await res.text()).slice(0, 300)}`);
+  return Buffer.from(await res.arrayBuffer());
+}
+
+async function elevenJson(path) {
+  const res = await fetch(`https://api.elevenlabs.io${path}`, { headers: { "xi-api-key": ELEVENLABS_API_KEY } });
+  if (!res.ok) throw new Error(`ElevenLabs ${res.status}: ${(await res.text()).slice(0, 300)}`);
+  return res.json();
+}
+
+// প্রতি চ্যাটের জন্য আলাদা ভয়েস (/setvoice) — রিস্টার্টে ডিফল্টে ফিরবে
+const chatVoices = new Map();
+const voiceFor = (chatId) => chatVoices.get(chatId) || ELEVENLABS_VOICE_ID;
+
+async function downloadTelegramFile(ctx, fileId) {
+  const file = await ctx.api.getFile(fileId);
+  const url = `https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN}/${file.file_path}`;
+  return Buffer.from(await (await fetch(url)).arrayBuffer());
+}
+
+// ভয়েস হিসেবে পাঠায়; Telegram না নিলে (প্রাইভেসি সেটিং) অডিও ফাইল হিসেবে পাঠায়
+async function sendVoice(ctx, buf, name = "voice.mp3") {
+  try {
+    await ctx.replyWithVoice(new InputFile(buf, name));
+  } catch (e) {
+    await ctx.replyWithAudio(new InputFile(buf, name));
+  }
+}
+
+async function replyLong(ctx, text) {
+  for (let i = 0; i < text.length; i += 4000) await ctx.reply(text.slice(i, i + 4000));
+}
+
 // যে চ্যাটে /voice চালু আছে, সেখানে টেক্সট প্রশ্নের উত্তরও ভয়েসে আসবে (রিস্টার্টে রিসেট)
 const voiceChats = new Set();
 
@@ -135,9 +178,15 @@ async function callLLM(messages) {
 // টেক্সট ও ভয়েস দুই হ্যান্ডলারই এটা ব্যবহার করে
 async function askAI(chatId, userText) {
   pushHistory(chatId, "user", userText);
-  const replyText =
-    (await callLLM([{ role: "system", content: SYSTEM_PROMPT }, ...getHistory(chatId)])) ||
-    "দুঃখিত, উত্তর তৈরি করতে পারিনি।";
+  let replyText;
+  try {
+    replyText =
+      (await callLLM([{ role: "system", content: SYSTEM_PROMPT }, ...getHistory(chatId)])) ||
+      "দুঃখিত, উত্তর তৈরি করতে পারিনি।";
+  } catch (e) {
+    getHistory(chatId).pop(); // ব্যর্থ প্রশ্ন হিস্ট্রিতে রাখছি না
+    throw e;
+  }
   pushHistory(chatId, "assistant", replyText);
   return replyText;
 }
@@ -151,13 +200,111 @@ async function sendReply(ctx, replyText, withVoice) {
   if (!withVoice || !ELEVENLABS_API_KEY) return;
   try {
     await ctx.replyWithChatAction("record_voice");
-    const audio = await textToSpeech(replyText);
-    await ctx.replyWithVoice(new InputFile(audio, "reply.mp3"));
+    const audio = await textToSpeech(replyText, voiceFor(ctx.chat.id));
+    await sendVoice(ctx, audio, "reply.mp3");
   } catch (error) {
     console.error("ElevenLabs TTS error:", error.message);
-    await ctx.reply("⚠️ ভয়েস তৈরি করা যায়নি (ElevenLabs key বা ক্রেডিট চেক করুন)।");
+    await ctx.reply(`⚠️ ভয়েস তৈরি করা যায়নি: ${String(error.message).slice(0, 300)}`);
   }
 }
+
+// ==== ElevenLabs কমান্ড ====
+const safe = (label, fn) => async (ctx) => {
+  try {
+    await fn(ctx);
+  } catch (error) {
+    console.error(label, error);
+    await ctx.reply(`⚠️ ${label} ব্যর্থ: ${String(error.message).slice(0, 400)}`);
+  }
+};
+const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n));
+const argText = (ctx) => (ctx.match || "").trim();
+// "/cmd 20 টেক্সট" → { num: 20, rest: "টেক্সট" }
+function splitNumber(text) {
+  const m = text.match(/^(\d+(?:\.\d+)?)\s+([\s\S]+)$/);
+  return m ? { num: parseFloat(m[1]), rest: m[2] } : { num: null, rest: text };
+}
+function repliedAudioId(ctx) {
+  const r = ctx.message.reply_to_message;
+  const a = r && (r.voice || r.audio);
+  return a ? a.file_id : null;
+}
+
+// /say <লেখা> — যেকোনো লেখা পড়ে শোনাবে (লেখায় রিপ্লাই করেও চলে)
+bot.command("say", safe("TTS", async (ctx) => {
+  const r = ctx.message.reply_to_message;
+  const text = argText(ctx) || (r && (r.text || r.caption)) || "";
+  if (!text) return ctx.reply("ব্যবহার: /say আপনার লেখা");
+  await ctx.replyWithChatAction("record_voice");
+  await sendVoice(ctx, await textToSpeech(text, voiceFor(ctx.chat.id)), "say.mp3");
+}));
+
+// /sfx [সেকেন্ড] <বর্ণনা> — সাউন্ড ইফেক্ট (০.৫–৩০ সেকেন্ড)
+bot.command("sfx", safe("সাউন্ড ইফেক্ট", async (ctx) => {
+  const { num, rest } = splitNumber(argText(ctx));
+  if (!rest) return ctx.reply("ব্যবহার: /sfx 5 বজ্রপাতের শব্দ  (সেকেন্ড না দিলে অটো)");
+  await ctx.replyWithChatAction("upload_voice");
+  const json = { text: rest };
+  if (num) json.duration_seconds = clamp(num, 0.5, 30);
+  await ctx.replyWithAudio(new InputFile(await elevenAudio("/v1/sound-generation", { json }), "sfx.mp3"));
+}));
+
+// /music [সেকেন্ড] <বর্ণনা> — মিউজিক (ডিফল্ট ৩০ সেকেন্ড, সর্বোচ্চ ১০ মিনিট; ক্রেডিট বেশি লাগে)
+bot.command("music", safe("মিউজিক", async (ctx) => {
+  const { num, rest } = splitNumber(argText(ctx));
+  if (!rest) return ctx.reply("ব্যবহার: /music 30 শান্ত lo-fi বিট  (সেকেন্ড না দিলে ৩০)");
+  await ctx.reply("🎵 বানাচ্ছি, একটু সময় লাগবে...");
+  await ctx.replyWithChatAction("upload_voice");
+  const json = { prompt: rest, music_length_ms: Math.round(clamp(num || 30, 3, 600) * 1000) };
+  await ctx.replyWithAudio(new InputFile(await elevenAudio("/v1/music", { json }), "music.mp3"));
+}));
+
+// /voices — আপনার অ্যাকাউন্টের ভয়েস লিস্ট
+bot.command("voices", safe("ভয়েস লিস্ট", async (ctx) => {
+  let data;
+  try {
+    data = await elevenJson("/v2/voices?page_size=100");
+  } catch (e) {
+    data = await elevenJson("/v1/voices");
+  }
+  const lines = (data.voices || []).map((v) => `${v.name} — ${v.voice_id}`);
+  if (!lines.length) return ctx.reply("কোনো ভয়েস পাওয়া যায়নি।");
+  await replyLong(ctx, `${lines.join("\n")}\n\nবদলাতে: /setvoice <voice_id>`);
+}));
+
+// /setvoice <voice_id> — এই চ্যাটের ভয়েস বদলায় (/setvoice reset = ডিফল্ট)
+bot.command("setvoice", safe("ভয়েস বদল", async (ctx) => {
+  const id = argText(ctx);
+  if (!id) return ctx.reply("ব্যবহার: /setvoice <voice_id>   (আইডি দেখতে /voices)");
+  if (id === "reset") {
+    chatVoices.delete(ctx.chat.id);
+    return ctx.reply("✅ ডিফল্ট ভয়েসে ফিরেছে।");
+  }
+  const v = await elevenJson(`/v1/voices/${encodeURIComponent(id)}`);
+  chatVoices.set(ctx.chat.id, id);
+  await ctx.reply(`✅ ভয়েস: ${v.name || id}`);
+}));
+
+// /change — কোনো ভয়েস মেসেজে রিপ্লাই করে দিন; একই কথা বর্তমান ভয়েসে ফেরত আসবে (Voice Changer)
+bot.command("change", safe("ভয়েস চেঞ্জার", async (ctx) => {
+  const fileId = repliedAudioId(ctx);
+  if (!fileId) return ctx.reply("কোনো ভয়েস/অডিও মেসেজে রিপ্লাই করে /change লিখুন।");
+  await ctx.replyWithChatAction("record_voice");
+  const form = new FormData();
+  form.append("model_id", "eleven_multilingual_sts_v2");
+  form.append("audio", new Blob([await downloadTelegramFile(ctx, fileId)], { type: "audio/ogg" }), "input.ogg");
+  await sendVoice(ctx, await elevenAudio(`/v1/speech-to-speech/${voiceFor(ctx.chat.id)}?output_format=mp3_44100_64`, { form }), "changed.mp3");
+}));
+
+// /clean — কোনো ভয়েস/অডিওতে রিপ্লাই করে দিন; ব্যাকগ্রাউন্ড নয়েজ মুছে পরিষ্কার কণ্ঠ ফেরত দেবে (Voice Isolator)
+bot.command("clean", safe("নয়েজ রিমুভ", async (ctx) => {
+  const fileId = repliedAudioId(ctx);
+  if (!fileId) return ctx.reply("কোনো ভয়েস/অডিও মেসেজে রিপ্লাই করে /clean লিখুন।");
+  await ctx.replyWithChatAction("upload_voice");
+  const form = new FormData();
+  form.append("audio", new Blob([await downloadTelegramFile(ctx, fileId)], { type: "audio/ogg" }), "input.ogg");
+  await ctx.replyWithAudio(new InputFile(await elevenAudio("/v1/audio-isolation", { form }), "clean.mp3"));
+}));
 
 // ==== টেক্সট মেসেজ হ্যান্ডলার ====
 bot.on("message:text", async (ctx) => {
@@ -182,7 +329,27 @@ bot.on("message:text", async (ctx) => {
     return;
   }
   if (userText === "/start") {
-    await ctx.reply("👋 হ্যালো! আমি AI বট। টেক্সট লিখুন, ছবি পাঠান, বা প্রশ্ন করুন — যা খুশি জিজ্ঞেস করতে পারেন।\n\nমেমরি মুছতে: /clear\nভয়েস উত্তর চালু/বন্ধ: /voice\n🎤 ভয়েস মেসেজও পাঠাতে পারেন।");
+    await ctx.reply(
+      "👋 হ্যালো! আমি ElevenLabs ভয়েস বট।\n\n" +
+        (LLM_ENABLED
+          ? "💬 লিখুন/ছবি পাঠান — AI উত্তর দেবে (/voice দিলে ভয়েসেও)\n"
+          : "💬 কিছু লিখলে আমি পড়ে শোনাব\n") +
+        "🎤 ভয়েস মেসেজ পাঠান — লিখে দেব\n\n" +
+        "/say লেখা — পড়ে শোনাব\n/sfx 5 বজ্রপাত — সাউন্ড ইফেক্ট\n/music 30 lo-fi বিট — মিউজিক\n" +
+        "/voices, /setvoice — ভয়েস বদল\n/change (ভয়েসে রিপ্লাই) — কণ্ঠ বদল\n/clean (ভয়েসে রিপ্লাই) — নয়েজ মুছুন\n/clear — মেমরি মুছুন"
+    );
+    return;
+  }
+
+  // AI না থাকলে সাধারণ লেখা পড়ে শোনানো হবে
+  if (!LLM_ENABLED) {
+    try {
+      await ctx.replyWithChatAction("record_voice");
+      await sendVoice(ctx, await textToSpeech(userText, voiceFor(chatId)), "say.mp3");
+    } catch (error) {
+      console.error(error);
+      await ctx.reply(`⚠️ ভয়েস তৈরি করা যায়নি: ${String(error.message).slice(0, 300)}`);
+    }
     return;
   }
 
@@ -192,35 +359,47 @@ bot.on("message:text", async (ctx) => {
     await sendReply(ctx, replyText, voiceChats.has(chatId));
   } catch (error) {
     console.error(error);
-    await ctx.reply("⚠️ একটি এরর হয়েছে। AI API key, মডেলের নাম বা লিমিট চেক করুন।");
+    await ctx.reply(`⚠️ AI এরর: ${String(error.message).slice(0, 400)}`);
   }
 });
 
-// ==== ভয়েস মেসেজ হ্যান্ডলার (ElevenLabs STT → AI → টেক্সট + ভয়েস উত্তর) ====
-bot.on("message:voice", async (ctx) => {
+// ==== ভয়েস/অডিও হ্যান্ডলার: ElevenLabs STT → লেখা; AI চালু থাকলে AI উত্তর (টেক্সট + ভয়েস) ====
+async function handleAudioIn(ctx, fileId, withAI) {
   const chatId = ctx.chat.id;
-  if (!ELEVENLABS_API_KEY) {
-    await ctx.reply("⚠️ ভয়েসের জন্য ELEVENLABS_API_KEY সেট করুন।");
+  await ctx.replyWithChatAction("typing");
+  const userText = await speechToText(await downloadTelegramFile(ctx, fileId));
+  if (!userText) {
+    await ctx.reply("⚠️ অডিও থেকে কিছু বুঝতে পারিনি।");
     return;
   }
+  await replyLong(ctx, `🎤 ${userText}`);
+  if (!withAI || !LLM_ENABLED) return;
+
   try {
-    await ctx.replyWithChatAction("typing");
-    const file = await ctx.api.getFile(ctx.message.voice.file_id);
-    const fileUrl = `https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN}/${file.file_path}`;
-    const audioBuffer = Buffer.from(await (await fetch(fileUrl)).arrayBuffer());
-
-    const userText = await speechToText(audioBuffer);
-    if (!userText) {
-      await ctx.reply("⚠️ ভয়েস থেকে কিছু বুঝতে পারিনি।");
-      return;
-    }
-    await ctx.reply(`🎤 ${userText}`);
-
     const replyText = await askAI(chatId, userText);
     await sendReply(ctx, replyText, true);
   } catch (error) {
     console.error(error);
-    await ctx.reply("⚠️ ভয়েস প্রসেস করতে সমস্যা হয়েছে।");
+    await ctx.reply(`⚠️ AI এরর: ${String(error.message).slice(0, 400)}`);
+  }
+}
+
+bot.on("message:voice", async (ctx) => {
+  try {
+    await handleAudioIn(ctx, ctx.message.voice.file_id, true);
+  } catch (error) {
+    console.error(error);
+    await ctx.reply(`⚠️ ভয়েস প্রসেস ব্যর্থ: ${String(error.message).slice(0, 300)}`);
+  }
+});
+
+// অডিও ফাইল (MP3 ইত্যাদি) পাঠালে শুধু লিখে দেবে (AI ছাড়া)
+bot.on("message:audio", async (ctx) => {
+  try {
+    await handleAudioIn(ctx, ctx.message.audio.file_id, false);
+  } catch (error) {
+    console.error(error);
+    await ctx.reply(`⚠️ অডিও প্রসেস ব্যর্থ: ${String(error.message).slice(0, 300)}`);
   }
 });
 
@@ -265,6 +444,21 @@ bot.on("message:photo", async (ctx) => {
 bot.on("message:document", async (ctx) => {
   await ctx.reply("⚠️ আপাতত ফাইল/PDF সাপোর্ট নেই। টেক্সট, ছবি বা ভয়েস পাঠান।");
 });
+
+// Telegram এর "/" মেনুতে কমান্ড দেখানো
+bot.api
+  .setMyCommands([
+    { command: "say", description: "লেখা পড়ে শোনাও" },
+    { command: "sfx", description: "সাউন্ড ইফেক্ট বানাও" },
+    { command: "music", description: "মিউজিক বানাও" },
+    { command: "voices", description: "ভয়েসের লিস্ট" },
+    { command: "setvoice", description: "ভয়েস বদলাও" },
+    { command: "change", description: "ভয়েসে রিপ্লাই করে কণ্ঠ বদলাও" },
+    { command: "clean", description: "ভয়েসে রিপ্লাই করে নয়েজ মুছো" },
+    { command: "voice", description: "AI উত্তর ভয়েসে চালু/বন্ধ" },
+    { command: "clear", description: "মেমরি মুছো" },
+  ])
+  .catch(() => {});
 
 bot.start();
 console.log("🤖 Telegram Bot চলছে...");
