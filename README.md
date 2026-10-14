@@ -1,43 +1,37 @@
-# Telegram AI Bot — শুধু মালিকের জন্য
+# Telegram ElevenLabs বট — শুধু মালিকের জন্য
 
-টেক্সট চ্যাট, ছবি বোঝা, আর ElevenLabs ভয়েস (ভয়েস মেসেজ → টেক্সট, উত্তর → ভয়েস)।
-Anthropic লাগে না — যেকোনো OpenAI-compatible AI API চলে।
+ElevenLabs এর ভয়েস ফিচার Telegram এ। AI চ্যাট ঐচ্ছিক (Anthropic লাগে না)।
 
-> বাদ গেছে: ওয়েব সার্চ ও PDF পড়া (এগুলো Anthropic-নির্ভর ছিল)।
-
-## ১. Environment Variables (Render → Environment)
-| নাম | কী বসাবেন |
+## Environment Variables (Render → Environment)
+| নাম | |
 |---|---|
-| `TELEGRAM_BOT_TOKEN` | @BotFather থেকে পাওয়া টোকেন |
-| `LLM_API_KEY` | আপনার AI provider এর key |
-| `LLM_BASE_URL` | provider এর base URL (নিচে উদাহরণ) |
-| `LLM_MODEL` | provider এর মডেলের হুবহু নাম |
-| `ELEVENLABS_API_KEY` | ElevenLabs key (ঐচ্ছিক — না দিলে ভয়েস বন্ধ) |
-| `OWNER_ID` | আপনার Telegram numeric ID (নিচে দেখুন) |
+| `TELEGRAM_BOT_TOKEN` | বাধ্যতামূলক — @BotFather থেকে |
+| `ELEVENLABS_API_KEY` | বাধ্যতামূলক |
+| `OWNER_ID` | আপনার Telegram ID (বটকে `/id` পাঠিয়ে জানুন) — না দিলে শুধু `/id` কাজ করবে |
+| `LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL` | ঐচ্ছিক — যেকোনো OpenAI-compatible AI (Gemini, Groq, OpenRouter…)। না দিলে AI বন্ধ |
+| `ELEVENLABS_VOICE_ID` / `ELEVENLABS_TTS_MODEL` / `ELEVENLABS_STT_MODEL` | ঐচ্ছিক (ডিফল্ট: George / `eleven_v3` / `scribe_v1`) |
 
-`LLM_BASE_URL` উদাহরণ:
-- Gemini: `https://generativelanguage.googleapis.com/v1beta/openai`
-- Groq: `https://api.groq.com/openai/v1`
-- OpenRouter: `https://openrouter.ai/api/v1`
-- OpenAI: `https://api.openai.com/v1`
+## ফিচার
+| কী পাঠাবেন | কী হবে |
+|---|---|
+| 🎤 ভয়েস মেসেজ / অডিও ফাইল | লিখে দেবে (Speech-to-Text); AI চালু থাকলে AI উত্তরও দেবে |
+| যেকোনো লেখা (AI বন্ধ থাকলে) | পড়ে শোনাবে (Text-to-Speech) |
+| `/say লেখা` | পড়ে শোনাবে (লেখায় রিপ্লাই করেও চলে) |
+| `/sfx 5 বজ্রপাত` | সাউন্ড ইফেক্ট (০.৫–৩০ সেকেন্ড; সেকেন্ড না দিলে অটো) |
+| `/music 30 শান্ত lo-fi বিট` | মিউজিক (ডিফল্ট ৩০ সেকেন্ড, সর্বোচ্চ ১০ মিনিট — ক্রেডিট বেশি লাগে) |
+| `/voices` | আপনার অ্যাকাউন্টের ভয়েস লিস্ট |
+| `/setvoice <voice_id>` | ভয়েস বদলান (`/setvoice reset` = ডিফল্ট) |
+| ভয়েসে রিপ্লাই করে `/change` | একই কথা বর্তমান ভয়েসে (Voice Changer) |
+| ভয়েসে রিপ্লাই করে `/clean` | ব্যাকগ্রাউন্ড নয়েজ মুছবে (Voice Isolator) |
+| `/voice` | (AI চালু থাকলে) AI উত্তর ভয়েসেও পাওয়া চালু/বন্ধ |
+| `/clear` | AI চ্যাটের মেমরি মুছুন |
 
-ছবি বোঝার জন্য এমন মডেল লাগবে যেটা image সাপোর্ট করে।
+ছবি পাঠালে (AI চালু থাকলে) ছবি বুঝে উত্তর দেবে। PDF ও ওয়েব সার্চ নেই।
 
-## ২. মালিক ঠিক করা (OWNER_ID)
-1. `OWNER_ID` ছাড়াই প্রথমে deploy করুন
-2. বটকে Telegram এ `/id` পাঠান — আপনার ID বলে দেবে
-3. Render এ `OWNER_ID` = সেই সংখ্যা সেট করুন, redeploy করুন
-4. এরপর থেকে শুধু আপনার মেসেজেই বট উত্তর দেবে; অন্য কেউ লিখলে কোনো সাড়া পাবে না
-
-## ৩. কমান্ড
-- `/start` — পরিচয়
-- `/clear` — মেমরি মুছুন
-- `/voice` — টেক্সট প্রশ্নের উত্তরও ভয়েসে পেতে চালু/বন্ধ
-- 🎤 ভয়েস মেসেজ পাঠালে উত্তর টেক্সট + ভয়েস দুটোই আসে
-
-## ৪. Render এ চালানো
+## Render এ চালানো
 Build: `npm install` · Start: `npm start`
 
 ## নোট
-- মেমরি স্থায়ী নয় — বট রিস্টার্ট হলে হিস্ট্রি ও `/voice` সেটিং মুছে যায়
+- মেমরি, `/voice` ও `/setvoice` সেটিং স্থায়ী নয় — রিস্টার্টে ডিফল্টে ফেরে
 - কোনো key GitHub বা চ্যাটে পেস্ট করবেন না — শুধু Render এর Environment Variables এ
+- ElevenLabs key এ যত কম পারমিশন দেবেন তত নিরাপদ; ব্যবহৃত ফিচারের জন্য লাগে: Text to Speech, Speech to Text, Sound Effects, Music, Voice Changer, Audio Isolation, Voices (read)
