@@ -1,11 +1,15 @@
 const { Bot, InputFile } = require("grammy");
-const Anthropic = require("@anthropic-ai/sdk");
 const http = require("http");
 require("dotenv").config();
 
 // ==== এখানে দুটো জিনিস বসান (নিচে .env ফাইলেও করা যায়, ওটাই ভালো) ====
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+// AI (যেকোনো OpenAI-compatible API: Gemini, Groq, OpenRouter, OpenAI ইত্যাদি)
+const LLM_API_KEY = process.env.LLM_API_KEY;
+const LLM_BASE_URL = (process.env.LLM_BASE_URL || "").replace(/\/+$/, "");
+const LLM_MODEL = process.env.LLM_MODEL;
+// শুধু এই Telegram ID কাজ করাতে পারবে (নিচে দেখুন)
+const OWNER_ID = (process.env.OWNER_ID || "").trim();
 // ElevenLabs (ঐচ্ছিক) — না থাকলে ভয়েস ফিচার বন্ধ থাকবে, বাকি বট আগের মতোই চলবে
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
 const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || "JBFqnCBsd6RMkjVDRZzb";
@@ -13,8 +17,17 @@ const ELEVENLABS_TTS_MODEL = process.env.ELEVENLABS_TTS_MODEL || "eleven_v3"; //
 const ELEVENLABS_STT_MODEL = process.env.ELEVENLABS_STT_MODEL || "scribe_v1";
 const RENDER_EXTERNAL_URL = process.env.RENDER_EXTERNAL_URL; // Render নিজে থেকেই এটা সেট করে দেয়
 
-if (!TELEGRAM_BOT_TOKEN || !ANTHROPIC_API_KEY) {
-  console.error("❌ .env ফাইলে TELEGRAM_BOT_TOKEN বা ANTHROPIC_API_KEY নেই!");
+const missing = [];
+if (!TELEGRAM_BOT_TOKEN) missing.push("TELEGRAM_BOT_TOKEN");
+if (!LLM_API_KEY) missing.push("LLM_API_KEY");
+if (!LLM_BASE_URL) missing.push("LLM_BASE_URL");
+if (!LLM_MODEL) missing.push("LLM_MODEL");
+if (missing.length) {
+  console.error(`❌ এই Environment Variable পাওয়া যায়নি: ${missing.join(", ")}`);
+  // শুধু নাম দেখাচ্ছে (মান নয়), যাতে বানান ভুল ধরা যায়
+  const seen = Object.keys(process.env).filter((k) => /TELEGRAM|LLM|OWNER|ELEVEN|TOKEN|KEY/i.test(k));
+  console.error("ℹ️ এখন সেট করা সম্ভাব্য নাম:", seen.length ? seen.join(", ") : "(কিছুই নেই)");
+  console.error("ℹ️ নাম হুবহু মিলতে হবে — বড় হাতের অক্ষর, কোনো স্পেস নেই।");
   process.exit(1);
 }
 
@@ -38,7 +51,22 @@ if (RENDER_EXTERNAL_URL) {
 }
 
 const bot = new Bot(TELEGRAM_BOT_TOKEN);
-const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
+
+// ==== শুধু মালিক ব্যবহার করতে পারবে ====
+// OWNER_ID সেট না থাকলে শুধু /id কাজ করবে (নিজের ID জানার জন্য), বাকি সব বন্ধ।
+// OWNER_ID সেট থাকলে অন্য কেউ মেসেজ দিলে বট কোনো উত্তরই দেবে না।
+if (!OWNER_ID) console.warn("⚠️ OWNER_ID সেট নেই — বটকে /id পাঠিয়ে আপনার ID নিন, তারপর OWNER_ID সেট করুন।");
+bot.use(async (ctx, next) => {
+  const fromId = ctx.from ? String(ctx.from.id) : "";
+  if (!OWNER_ID) {
+    if (ctx.message && ctx.message.text === "/id") {
+      await ctx.reply(`আপনার Telegram ID: ${fromId}\nএটা Render এ OWNER_ID হিসেবে সেট করুন।`);
+    }
+    return;
+  }
+  if (fromId !== OWNER_ID) return;
+  await next();
+});
 
 // ==== মেমরি: প্রতিটা চ্যাট আইডির জন্য আলাদা হিস্ট্রি (in-memory, সহজ) ====
 // bot রিস্টার্ট হলে মেমরি মুছে যাবে — persistent memory চাইলে পরে বলবেন, JSON file বা DB দিয়ে করা যায়
@@ -89,25 +117,27 @@ async function speechToText(audioBuffer) {
 // যে চ্যাটে /voice চালু আছে, সেখানে টেক্সট প্রশ্নের উত্তরও ভয়েসে আসবে (রিস্টার্টে রিসেট)
 const voiceChats = new Set();
 
-// ==== Claude কে প্রশ্ন করা (টেক্সট ও ভয়েস দুই হ্যান্ডলারই এটা ব্যবহার করে) ====
-async function askClaude(chatId, userText) {
-  pushHistory(chatId, "user", userText);
+// ==== AI কে প্রশ্ন করা (OpenAI-compatible /chat/completions) ====
+const SYSTEM_PROMPT =
+  "তুমি একজন সহায়ক AI সহকারী। ব্যবহারকারী যে ভাষায় লেখে (বাংলা বা ইংরেজি) সেই ভাষায় সংক্ষেপে ও পরিষ্কারভাবে উত্তর দাও।";
 
-  const response = await anthropic.messages.create({
-    model: "claude-sonnet-4-6",
-    max_tokens: 1500,
-    // ওয়েব সার্চ চালু — Claude নিজে বুঝে নেবে কখন সার্চ দরকার
-    tools: [{ type: "web_search_20250305", name: "web_search" }],
-    messages: getHistory(chatId),
+async function callLLM(messages) {
+  const res = await fetch(`${LLM_BASE_URL}/chat/completions`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${LLM_API_KEY}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ model: LLM_MODEL, messages }),
   });
+  if (!res.ok) throw new Error(`LLM ${res.status}: ${await res.text()}`);
+  const data = await res.json();
+  return ((data.choices && data.choices[0] && data.choices[0].message.content) || "").trim();
+}
 
-  // response এ টেক্সট আর সার্চ রেজাল্ট মিশ্রিত থাকতে পারে, শুধু টেক্সট অংশ জোড়া দিচ্ছি
-  const replyText = response.content
-    .filter((block) => block.type === "text")
-    .map((block) => block.text)
-    .join("\n")
-    .trim() || "দুঃখিত, উত্তর তৈরি করতে পারিনি।";
-
+// টেক্সট ও ভয়েস দুই হ্যান্ডলারই এটা ব্যবহার করে
+async function askAI(chatId, userText) {
+  pushHistory(chatId, "user", userText);
+  const replyText =
+    (await callLLM([{ role: "system", content: SYSTEM_PROMPT }, ...getHistory(chatId)])) ||
+    "দুঃখিত, উত্তর তৈরি করতে পারিনি।";
   pushHistory(chatId, "assistant", replyText);
   return replyText;
 }
@@ -152,21 +182,21 @@ bot.on("message:text", async (ctx) => {
     return;
   }
   if (userText === "/start") {
-    await ctx.reply("👋 হ্যালো! আমি Claude AI বট। টেক্সট লিখুন, ছবি পাঠান, বা প্রশ্ন করুন — যা খুশি জিজ্ঞেস করতে পারেন।\n\nমেমরি মুছতে: /clear\nভয়েস উত্তর চালু/বন্ধ: /voice\n🎤 ভয়েস মেসেজও পাঠাতে পারেন।");
+    await ctx.reply("👋 হ্যালো! আমি AI বট। টেক্সট লিখুন, ছবি পাঠান, বা প্রশ্ন করুন — যা খুশি জিজ্ঞেস করতে পারেন।\n\nমেমরি মুছতে: /clear\nভয়েস উত্তর চালু/বন্ধ: /voice\n🎤 ভয়েস মেসেজও পাঠাতে পারেন।");
     return;
   }
 
   try {
     await ctx.replyWithChatAction("typing");
-    const replyText = await askClaude(chatId, userText);
+    const replyText = await askAI(chatId, userText);
     await sendReply(ctx, replyText, voiceChats.has(chatId));
   } catch (error) {
     console.error(error);
-    await ctx.reply("⚠️ একটি এরর হয়েছে। API key বা ব্যালেন্স চেক করুন।");
+    await ctx.reply("⚠️ একটি এরর হয়েছে। AI API key, মডেলের নাম বা লিমিট চেক করুন।");
   }
 });
 
-// ==== ভয়েস মেসেজ হ্যান্ডলার (ElevenLabs STT → Claude → টেক্সট + ভয়েস উত্তর) ====
+// ==== ভয়েস মেসেজ হ্যান্ডলার (ElevenLabs STT → AI → টেক্সট + ভয়েস উত্তর) ====
 bot.on("message:voice", async (ctx) => {
   const chatId = ctx.chat.id;
   if (!ELEVENLABS_API_KEY) {
@@ -186,7 +216,7 @@ bot.on("message:voice", async (ctx) => {
     }
     await ctx.reply(`🎤 ${userText}`);
 
-    const replyText = await askClaude(chatId, userText);
+    const replyText = await askAI(chatId, userText);
     await sendReply(ctx, replyText, true);
   } catch (error) {
     console.error(error);
@@ -214,24 +244,15 @@ bot.on("message:photo", async (ctx) => {
 
     const caption = ctx.message.caption || "এই ছবিতে কী আছে বলো।";
 
-    const response = await anthropic.messages.create({
-      model: "claude-sonnet-4-6",
-      max_tokens: 1500,
-      messages: [
-        {
-          role: "user",
-          content: [
-            { type: "image", source: { type: "base64", media_type: mediaType, data: base64Image } },
-            { type: "text", text: caption },
-          ],
-        },
-      ],
-    });
-
-    const replyText = response.content
-      .filter((b) => b.type === "text")
-      .map((b) => b.text)
-      .join("\n");
+    const replyText = await callLLM([
+      {
+        role: "user",
+        content: [
+          { type: "text", text: caption },
+          { type: "image_url", image_url: { url: `data:${mediaType};base64,${base64Image}` } },
+        ],
+      },
+    ]);
 
     await ctx.reply(replyText || "ছবিটি বুঝতে পারিনি।");
   } catch (error) {
@@ -240,47 +261,9 @@ bot.on("message:photo", async (ctx) => {
   }
 });
 
-// ==== ডকুমেন্ট/ফাইল হ্যান্ডলার (PDF ইত্যাদি) ====
+// ==== ডকুমেন্ট/ফাইল (PDF পড়া এই ভার্সনে নেই) ====
 bot.on("message:document", async (ctx) => {
-  const doc = ctx.message.document;
-  if (doc.mime_type !== "application/pdf") {
-    await ctx.reply("⚠️ আপাতত শুধু PDF ফাইল সাপোর্ট করি।");
-    return;
-  }
-  try {
-    await ctx.replyWithChatAction("typing");
-    const file = await ctx.api.getFile(doc.file_id);
-    const fileUrl = `https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN}/${file.file_path}`;
-    const pdfResponse = await fetch(fileUrl);
-    const arrayBuffer = await pdfResponse.arrayBuffer();
-    const base64Pdf = Buffer.from(arrayBuffer).toString("base64");
-
-    const caption = ctx.message.caption || "এই ডকুমেন্টটি সংক্ষেপে বলো।";
-
-    const response = await anthropic.messages.create({
-      model: "claude-sonnet-4-6",
-      max_tokens: 1500,
-      messages: [
-        {
-          role: "user",
-          content: [
-            { type: "document", source: { type: "base64", media_type: "application/pdf", data: base64Pdf } },
-            { type: "text", text: caption },
-          ],
-        },
-      ],
-    });
-
-    const replyText = response.content
-      .filter((b) => b.type === "text")
-      .map((b) => b.text)
-      .join("\n");
-
-    await ctx.reply(replyText || "ফাইলটি বুঝতে পারিনি।");
-  } catch (error) {
-    console.error(error);
-    await ctx.reply("⚠️ ফাইল প্রসেস করতে সমস্যা হয়েছে।");
-  }
+  await ctx.reply("⚠️ আপাতত ফাইল/PDF সাপোর্ট নেই। টেক্সট, ছবি বা ভয়েস পাঠান।");
 });
 
 bot.start();
