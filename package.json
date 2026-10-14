@@ -1,7 +1,7 @@
 {
-  "name": "telegram-claude-bot",
+  "name": "telegram-voice-ai-bot",
   "version": "1.0.0",
-  "description": "Telegram bot powered by Claude (text, image, PDF, memory, web search)",
+  "description": "Telegram bot (owner-only): AI chat via any OpenAI-compatible API + ElevenLabs voice in/out",
   "main": "bot.js",
   "type": "commonjs",
   "engines": {
@@ -12,7 +12,6 @@
   },
   "dependencies": {
     "grammy": "^1.21.1",
-    "@anthropic-ai/sdk": "^0.27.0",
     "dotenv": "^16.4.5"
   }
 }
