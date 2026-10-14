@@ -9,7 +9,8 @@ const LLM_API_KEY = process.env.LLM_API_KEY;
 const LLM_BASE_URL = (process.env.LLM_BASE_URL || "").replace(/\/+$/, "");
 const LLM_MODEL = process.env.LLM_MODEL;
 // শুধু এই Telegram ID কাজ করাতে পারবে (নিচে দেখুন)
-const OWNER_ID = (process.env.OWNER_ID || "").trim();
+// একাধিক জন হলে কমা দিয়ে: OWNER_ID=111,222,333
+const OWNER_IDS = (process.env.OWNER_ID || "").split(",").map((x) => x.trim()).filter(Boolean);
 // ElevenLabs (মূল ফিচার)
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
 const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || "JBFqnCBsd6RMkjVDRZzb";
@@ -57,16 +58,15 @@ const bot = new Bot(TELEGRAM_BOT_TOKEN);
 // ==== শুধু মালিক ব্যবহার করতে পারবে ====
 // OWNER_ID সেট না থাকলে শুধু /id কাজ করবে (নিজের ID জানার জন্য), বাকি সব বন্ধ।
 // OWNER_ID সেট থাকলে অন্য কেউ মেসেজ দিলে বট কোনো উত্তরই দেবে না।
-if (!OWNER_ID) console.warn("⚠️ OWNER_ID সেট নেই — বটকে /id পাঠিয়ে আপনার ID নিন, তারপর OWNER_ID সেট করুন।");
+if (!OWNER_IDS.length) console.warn("⚠️ OWNER_ID সেট নেই — বটকে /id পাঠিয়ে আপনার ID নিন, তারপর OWNER_ID সেট করুন।");
 bot.use(async (ctx, next) => {
   const fromId = ctx.from ? String(ctx.from.id) : "";
-  if (!OWNER_ID) {
-    if (ctx.message && ctx.message.text === "/id") {
-      await ctx.reply(`আপনার Telegram ID: ${fromId}\nএটা Render এ OWNER_ID হিসেবে সেট করুন।`);
-    }
+  // /id সবার জন্য খোলা (শুধু নিজের ID বলে) — বন্ধুর ID জানতে কাজে লাগে
+  if (ctx.message && ctx.message.text === "/id") {
+    await ctx.reply(`আপনার Telegram ID: ${fromId}\nএটা Render এ OWNER_ID তে যোগ করুন (একাধিক হলে কমা দিয়ে)।`);
     return;
   }
-  if (fromId !== OWNER_ID) return;
+  if (!OWNER_IDS.includes(fromId)) return; // অনুমতি নেই → কোনো উত্তর নেই
   await next();
 });
 
