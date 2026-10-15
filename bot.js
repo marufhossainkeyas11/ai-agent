@@ -12,7 +12,11 @@ const LLM_MODEL = process.env.LLM_MODEL;
 // একাধিক জন হলে কমা দিয়ে: OWNER_ID=111,222,333
 const OWNER_IDS = (process.env.OWNER_ID || "").split(",").map((x) => x.trim()).filter(Boolean);
 // ElevenLabs (মূল ফিচার)
-const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
+const ELEVENLABS_API_KEY = (process.env.ELEVENLABS_API_KEY || "")
+  .trim()
+  .replace(/^ELEVENLABS_API_KEY\s*=\s*/, "")
+  .replace(/^["']+|["']+$/g, "")
+  .trim();
 const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || "JBFqnCBsd6RMkjVDRZzb";
 const ELEVENLABS_TTS_MODEL = process.env.ELEVENLABS_TTS_MODEL || "eleven_v3"; // বাংলা সাপোর্ট করে
 const ELEVENLABS_STT_MODEL = process.env.ELEVENLABS_STT_MODEL || "scribe_v1";
@@ -304,6 +308,29 @@ bot.command("clean", safe("নয়েজ রিমুভ", async (ctx) => {
   const form = new FormData();
   form.append("audio", new Blob([await downloadTelegramFile(ctx, fileId)], { type: "audio/ogg" }), "input.ogg");
   await ctx.replyWithAudio(new InputFile(await elevenAudio("/v1/audio-isolation", { form }), "clean.mp3"));
+}));
+
+// /keycheck — শুধু প্রথম মালিক। key এর আসল মান দেখায় না; কী অবস্থায় আছে আর ElevenLabs কী বলছে সেটা দেখায়
+bot.command("keycheck", safe("keycheck", async (ctx) => {
+  if (String(ctx.from.id) !== OWNER_IDS[0]) return;
+  const raw = process.env.ELEVENLABS_API_KEY || "";
+  const lines = [
+    `🔑 key দৈর্ঘ্য: ${ELEVENLABS_API_KEY.length}, শুরু: ${ELEVENLABS_API_KEY.slice(0, 3)}…`,
+    `স্পেস/কোটেশন ছিল: ${raw !== ELEVENLABS_API_KEY ? "হ্যাঁ (কোড ঠিক করে নিয়েছে)" : "না"}`,
+    `সার্ভিস: ${process.env.RENDER_SERVICE_NAME || "?"} | কমিট: ${(process.env.RENDER_GIT_COMMIT || "?").slice(0, 7)}`,
+  ];
+  for (const [name, path] of [["user", "/v1/user"], ["models", "/v1/models"], ["voices", "/v1/voices"]]) {
+    const res = await fetch(`https://api.elevenlabs.io${path}`, { headers: { "xi-api-key": ELEVENLABS_API_KEY } });
+    let why = "";
+    if (!res.ok) {
+      try {
+        const j = await res.json();
+        why = (j.detail && (j.detail.status || j.detail.code)) || "";
+      } catch (e) {}
+    }
+    lines.push(`${name}: ${res.status} ${res.ok ? "✅" : why}`);
+  }
+  await ctx.reply(lines.join("\n"));
 }));
 
 // ==== টেক্সট মেসেজ হ্যান্ডলার ====
